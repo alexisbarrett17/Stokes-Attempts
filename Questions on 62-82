@@ -1,0 +1,176 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.interpolate import griddata
+
+
+#### Harmonic Functions in Cartesian and Polar Coordinates ####
+def harmonic_function_cartesian(x, y, n):
+    r = np.sqrt(x ** 2 + y ** 2)
+    theta = np.arctan2(y, x)
+    return r ** n * np.cos(n * theta) #The zero used to be an np.nan
+
+def gradient_harmonic_cartesian(x, y, n):
+    r = np.sqrt(x ** 2 + y ** 2)
+    theta = np.arctan2(y, x)
+    u_x = n * r ** (n - 1) * np.cos(n * theta) * (x / r)
+    u_y = n * r ** (n - 1) * np.cos(n * theta) * (y / r)
+    return np.array([u_x, u_y])
+
+def laplacian_harmonic_cartesian(x, y, n):
+    return np.zeros_like(x)  # Harmonic functions satisfy Laplace's equation (Δu = 0)
+
+def cartesian_to_polar(x, y):
+    r = np.sqrt(x ** 2 + y ** 2)
+    theta = np.arctan2(y, x)
+    return r, theta
+
+
+#### Green's Function for Laplace's Equation ####
+def green_function(x, y, x_source, y_source):
+    r = np.sqrt((x - x_source) ** 2 + (y - y_source) ** 2)
+    return np.where(r > 1e-8, -(1 / (2 * np.pi)) * np.log(r), 0)
+
+#This gradient is computed with respect to the source element.
+def gradient_green_function(x, y, x_source, y_source): #this is dGdn.
+    r = np.sqrt((x - x_source) ** 2 + (y - y_source) ** 2)
+    factor = np.where(r > 1e-8, 1 / (2 * np.pi * r ** 2), 0)
+    dG_x = factor * (x - x_source)
+    dG_y = factor * (y - y_source)
+    return np.array([dG_x, dG_y])
+
+# gradient_green_function is dGdn is the gradient of greens function need to dot this with the normal at the boundary points
+# i is domain
+# j is boundary point
+
+
+#### Setup for Boundary Integral Approximation (Fixing dGdn) ####
+#Ellipse parameters
+L = 5  # Domain size
+N = 100  # Number of points in the x,y domain
+M = 50  # Number of points on the boundary
+a = 3  #Semi-major axis
+b = 2  #Semi-minor axis
+
+
+theta_values = np.linspace(0, 2 * np.pi, M, endpoint=False) #Generates the points of our ellipse. We aren't using an equation
+p = np.array([(a * np.cos(theta), b * np.sin(theta)) for theta in theta_values]) #for _____ in ____ we call that a comprehension.
+## p is the representation of boundary points
+midpoints = np.array([(p[i] + p[(i+1) % len(p)]) / 2 for i in range(0,len(p))])  #This is also a comprehension :)
+h = np.array([np.linalg.norm(p[i] - p[(i+1) % len(p)]) for i in range(0,len(p))]) #This is my arc length
+#Used to be boundary_points = np.array([[a * np.cos(theta), b * np.sin(theta)] for theta in theta_values])
+
+#figure this out.
+# Compute Normal Vectors at Boundary/midpoints#
+# Compute tangent vectors
+tangent_vectors = np.array([p[(i + 1) % M] - p[i] for i in range(M)])
+tangent_vectors /= np.linalg.norm(tangent_vectors, axis=1, keepdims=True)  # Normalize
+
+# Compute Normal Vectors Using Tangent Vectors (More Precise Rotation)
+normal_vectors = np.array([[-tangent_vectors[i, 1], tangent_vectors[i, 0]] for i in range(M)]) 
+#tangent_vectors is negative is to compensate for the rotation that was applied when calculating normal_vectors
+#Había una vez, we had normal_vectors = np.array([[mx / a**2, my / b**2] / np.sqrt((mx**2 / a**4) + (my**2 / b**4)) for mx, my in midpoints])
+
+# Ensure outward-pointing normals
+for i in range(M):
+    r_vector = p[i] / np.linalg.norm(p[i])  # Approximate outward direction
+    if np.dot(normal_vectors[i], r_vector) < 0:  # If inward, flip
+        normal_vectors[i] *= -1
+
+# Verify Orthogonality (Dot Product Should Be Zero)
+dot_products = np.array([np.dot(-tangent_vectors[i], normal_vectors[i]) for i in range(M)])
+# Reasone tangent_vectors is negative is to compensate for the rotation that was applied when calculating normal_vectors
+print("Dot Products (should be zero):", dot_products)  # Should now print all zeros
+
+
+#Set up for Boundary Integral Approx. #
+grid_x = np.linspace(-L, L, N)
+grid_y = np.linspace(-L, L, N)
+X, Y = np.meshgrid(grid_x, grid_y)  # Corrected replacement for 'interior_points'
+
+
+G_matrix = np.zeros((N**2, M))  # Each interior point has M boundary contributions
+#This also will return the number of domain points....
+dGn_matrix = np.zeros((N**2, M))  # Should be 2D, not 3D
+phi_values = np.zeros(M)
+diff_phi_values = np.zeros(M)
+
+#bx, by was replaced by mx, my
+
+for j, (mx, my) in enumerate(midpoints):
+    phi_values[j] = harmonic_function_cartesian(mx, my, n=3)
+    grad_phi = gradient_harmonic_cartesian(mx, my, n=3)
+    diff_phi_values[j] = grad_phi[0] * (normal_vectors[j][0]) + grad_phi[1] * (normal_vectors[j][1])
+
+# Compute Green’s function and dGdn
+for j in range(M):  # Loop over boundary points
+    mx, my = midpoints[j]
+    normal_x, normal_y = normal_vectors[j]
+
+    for i in range(N ** 2):  # Loop over domain points
+        ix, iy = X.ravel()[i], Y.ravel()[i]  # Flattened domain points. Could have used flatten here too.
+        #Benefit of .ravel is that it produces a memory efficient view.
+        # Compute Green's function
+        G_matrix[i, j] = green_function(ix, iy, mx, my)
+
+        # Compute Gradient of Green’s Function
+        grad_G = gradient_green_function(ix, iy, mx, my)
+
+        # Compute dGdn = (∇G · n) at the boundary
+        dGn_matrix[i, j] = grad_G[0] * (normal_vectors[j][0]) + grad_G[1] * (normal_vectors[j][1])
+
+
+#### Compute Boundary Integral Approximation (Now with dGdn) ####
+Gdphi_dn =   (G_matrix @ (h * diff_phi_values))
+dGdnphi =  (dGn_matrix @ (h * phi_values))  # Use the fixed dGn_matrix
+boundary_integral = (Gdphi_dn - dGdnphi) # Final computation
+
+
+
+#### BEM ####
+plt.figure(figsize=(6, 6))
+mask = (X**2 / a**2 + Y**2 / b**2) <= 1 #Mask for Interior Points (inside the ellipse)
+interior_x = X[mask]
+interior_y = Y[mask]
+
+# Plot only the interior points (blue)
+plt.scatter(interior_x, interior_y, color="blue", label="Interior points", s=10)
+
+# Plot the boundary points (red)
+plt.scatter(midpoints[:, 0], midpoints[:, 1], color="red", label="Boundary points", s=30)
+
+# Plot normal vectors at boundary
+for i in range(M):
+    plt.arrow(midpoints[i, 0], midpoints[i, 1],
+              normal_vectors[i, 0] * 0.5, normal_vectors[i, 1] * 0.5,
+              head_width=0.2, head_length=0.2, color='black')
+
+plt.title("Interior and Boundary Points with Normal Vectors")
+plt.xlabel("x")
+plt.ylabel("y")
+plt.legend()
+plt.axis('equal')
+plt.show()
+
+
+#### Heatmap Visualization ####
+heatmap_res = 100
+x_values = np.linspace(-L, L, heatmap_res)
+y_values = np.linspace(-L, L, heatmap_res)
+X, Y = np.meshgrid(x_values, y_values, indexing='ij')
+
+# Prepare for interpolation
+points = np.column_stack((X.ravel(), Y.ravel()))
+values = boundary_integral.ravel()
+
+# Interpolate with no NaNs
+Z = griddata(points, values, (X, Y), method='nearest')
+
+# Plot Heatmap
+plt.figure(figsize=(7, 6))
+plt.imshow(Z, extent=[-L, L, -L, L], origin='lower', cmap='coolwarm', vmin = -3, vmax = 3)
+plt.colorbar(label="Boundary Integral Approximation Value")
+plt.title("Boundary Integral Approximation Heatmap (No NaNs)")
+plt.xlabel("x")
+plt.ylabel("y")
+plt.axis('equal')
+plt.show()
